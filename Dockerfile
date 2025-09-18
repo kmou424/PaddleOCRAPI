@@ -1,5 +1,8 @@
-# 使用 Python 3.8 slim 基础镜像
-FROM python:3.8-slim-bullseye
+# 使用 uv 提供的 Python 3.8 bookworm slim 基础镜像
+FROM astral/uv:python3.8-bookworm-slim
+
+# 设置 uv 的 PyPI 镜像为 USTC
+ENV UV_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple
 
 # 暴露端口
 EXPOSE 8000
@@ -7,7 +10,7 @@ EXPOSE 8000
 # 设置工作目录
 WORKDIR /app
 
-# 复制依赖文件并安装系统依赖
+# 复制依赖文件
 COPY requirements.txt /app/requirements.txt
 
 # 换源并安装系统依赖
@@ -20,13 +23,10 @@ RUN sed -i "s@http://deb.debian.org@http://mirrors.tuna.tsinghua.edu.cn@g" /etc/
         libsm6 \
         libxrender1 \
         libxext6 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 换源并安装 Python 依赖
-RUN python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip && \
-    pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip3 install --no-cache-dir -r requirements.txt
+# 使用 uv 安装 Python 依赖到系统 Python 环境
+RUN uv pip install --system -r /app/requirements.txt
 
 # 复制项目文件
 COPY . /app

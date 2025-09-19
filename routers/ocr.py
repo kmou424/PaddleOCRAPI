@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 
 import os
-from dataclasses import dataclass
-from typing import Literal, Optional
 
 import requests
-from fastapi import APIRouter, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, HTTPException, UploadFile, status
 from paddleocr import PaddleOCR
 from pydantic import BaseModel
 
@@ -22,105 +20,74 @@ ocr = PaddleOCR(use_angle_cls=True, lang=OCR_LANGUAGE)
 
 @router.get("/health", response_model=RestfulModel, summary="健康检查")
 def health():
-    restfulModel = RestfulModel(resultcode=200, message="Success", data="OK")
-    return restfulModel
+    return RestfulModel(resultcode=200, message="Success", data="OK")
 
 
-class PredictRequestModel(BaseModel):
-    type: Literal["path", "base64", "url"]
-    image_path: Optional[str] = None
-    base64_str: Optional[str] = None
-    image_url: Optional[str] = None
+class PredictPostModel(BaseModel):
+    type: str  # 可选值: path, url, base64
+    data: str  # 对应的数据
 
 
-@dataclass
-class HandleResult:
-    resultcode: int
-    message: str
-    data: list
-
-
-def handle_path(image_path: Optional[str]):
-    if not image_path:
-        raise HTTPException(status_code=400, detail="缺少 image_path 参数")
-    result = ocr.ocr(image_path, cls=True)
-    return HandleResult(resultcode=200, message="Success", data=result)
-
-
-def handle_base64(base64_str: Optional[str]):
-    if not base64_str:
-        raise HTTPException(status_code=400, detail="缺少 base64_str 参数")
-    img = base64_to_ndarray(base64_str)
-    result = ocr.ocr(img=img, cls=True)
-    return HandleResult(resultcode=200, message="Success", data=result)
-
-
-def handle_url(image_url: Optional[str]):
-    if not image_url:
-        raise HTTPException(status_code=400, detail="缺少 image_url 参数")
-    response = requests.get(image_url)
-    image_bytes = response.content
-    if image_bytes.startswith(b"\xff\xd8\xff") or image_bytes.startswith(
-        b"\x89PNG\r\n\x1a\n"
-    ):
-        img = bytes_to_ndarray(image_bytes)
-        result = ocr.ocr(img=img, cls=True)
-        return HandleResult(resultcode=200, message="Success", data=result)
-    else:
+@router.post("/predict", response_model=RestfulModel, summary="统一识别接口")
+async def predict(predict_model: PredictPostModel):
+    """
+    统一识别接口，根据 type 字段选择识别方式:
+    - path: data 为本地图片路径
+    - url: data 为图片 URL
+    - base64: data 为 base64 字符串
+    """
+    type_ = predict_model.type.lower()
+    data_ = predict_model.data
+    try:
+        if type_ == "path":
+            result = ocr.ocr(data_, cls=True)
+        elif type_ == "base64":
+            img = base64_to_ndarray(data_)
+            result = ocr.ocr(img=img, cls=True)
+        elif type_ == "url":
+            response = requests.get(data_)
+            image_bytes = response.content
+            if image_bytes.startswith(b"\xff\xd8\xff") or image_bytes.startswith(
+                b"\x89PNG\r\n\x1a\n"
+            ):
+                img = bytes_to_ndarray(image_bytes)
+                result = ocr.ocr(img=img, cls=True)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="请上传 .jpg 或 .png 格式图片",
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="type 字段只支持 path、url、base64",
+            )
+        return RestfulModel(
+            resultcode=200, message="Success", data=result, cls=OCRModel
+        )
+    except HTTPException as e:
+        raise e
+    except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请上传 .jpg 或 .png 格式图片",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"识别失败: {str(e)}",
         )
 
 
-def handle_file(file: Optional[UploadFile]):
-    if not file:
-        raise HTTPException(status_code=400, detail="缺少文件")
-    if file.filename.endswith((".jpg", ".png")):
+@router.post("/predict-by-file", response_model=RestfulModel, summary="识别上传文件")
+async def predict_by_file(file: UploadFile):
+    restfulModel: RestfulModel = RestfulModel()
+    if file.filename.endswith((".jpg", ".png")):  # 只处理常见格式图片
+        restfulModel.resultcode = 200
+        restfulModel.message = file.filename
         file_data = file.file
         file_bytes = file_data.read()
         img = bytes_to_ndarray(file_bytes)
         result = ocr.ocr(img=img, cls=True)
-        return HandleResult(resultcode=200, message=file.filename, data=result)
+        restfulModel.data = result
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="请上传 .jpg 或 .png 格式图片",
         )
-
-
-@router.post("/predict", response_model=RestfulModel, summary="推理接口")
-async def predict(
-    type: str = Form(..., description="图片类型: path, base64, url, file"),
-    image_path: Optional[str] = Form(None, description="本地图片路径"),
-    base64_str: Optional[str] = Form(None, description="Base64字符串"),
-    image_url: Optional[str] = Form(None, description="图片URL"),
-    file: Optional[UploadFile] = None,
-):
-    """
-    推理接口，根据 type 参数选择识别方式:
-    - path: 传 image_path
-    - base64: 传 base64_str
-    - url: 传 image_url
-    - file: 上传文件
-    """
-    restfulModel: RestfulModel = RestfulModel()
-    try:
-        if type == "path":
-            result: HandleResult = handle_path(image_path)
-        elif type == "base64":
-            result: HandleResult = handle_base64(base64_str)
-        elif type == "url":
-            result: HandleResult = handle_url(image_url)
-        elif type == "file":
-            result: HandleResult = handle_file(file)
-        else:
-            raise HTTPException(
-                status_code=400, detail="type 参数错误，只能为 path, base64, url, file"
-            )
-        restfulModel.resultcode = result.resultcode
-        restfulModel.message = result.message
-        restfulModel.data = result.data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OCR识别失败: {str(e)}")
     return restfulModel
